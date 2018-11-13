@@ -1,0 +1,179 @@
+#! /usr/bin/env python
+
+# standard modules
+import logging
+import os
+import sys
+import time
+import ipaddress
+from scapy.all import *
+import maas_utils as maas
+
+# ostinato modules
+# (user scripts using the installed package should prepend ostinato. i.e
+#  ostinato.core and ostinato.protocols)
+from core import ost_pb, DroneProxy
+from protocols.mac_pb2 import mac
+from protocols.ip4_pb2 import ip4, Ip4
+from protocols.textproto_pb2 import TextProtocol, textProtocol
+
+# setup logging
+log = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
+
+# Subnet to test
+IP_ADD = u'192.168.120.50'
+MASK = u'24'
+
+
+host_compute_1 = '192.168.110.30'
+host_compute_2 = '192.168.110.31'
+
+int_test_compute_1 = 'ens10'
+int_test_compute_2 = 'ens10'
+
+tx_port_number = 0
+rx_port_number = 0
+
+
+drone1 = DroneProxy(host_compute_1)
+drone2 = DroneProxy(host_compute_2)
+
+def connect_drone(drone):
+    # connect to drone
+    drone.connect()
+
+def get_interface_by_name(drone, name):
+    # retreive port id list
+    port_id_list = drone.getPortIdList()
+    # retrieve port config list
+    port_config_list = drone.getPortConfig(port_id_list)
+    print(port_config_list)
+
+    for port in port_config_list.port:
+        if port.name == name:
+            return port.port_id.id
+
+def add_stream(drone, tx_port):
+    # add a stream
+    stream_id = ost_pb.StreamIdList()
+    stream_id.port_id.CopyFrom(tx_port.port_id[0])
+    stream_id.stream_id.add().id = 1
+    drone.addStream(stream_id)
+    return stream_id
+
+def configure_stream(stream_id, stream_cfg, num_packets):
+    # configure the stream
+    s = stream_cfg.stream.add()
+    s.stream_id.id = stream_id.stream_id[0].id
+    s.core.is_enabled = True
+    s.core.frame_len = 1500
+    s.control.num_packets = num_packets
+    return s
+
+def configure_traffic_protocols(stream_config, mac_src, mac_dst, ip_src, ip_dst):
+    # setup stream protocols as mac:eth2:ip4:udp:payload
+    p = stream_config.protocol.add()
+    p.protocol_id.id = ost_pb.Protocol.kMacFieldNumber
+    p.Extensions[mac].dst_mac = mac_dst
+    p.Extensions[mac].src_mac = mac_src
+
+    p = stream_config.protocol.add()
+    p.protocol_id.id = ost_pb.Protocol.kEth2FieldNumber
+
+    p = stream_config.protocol.add()
+    p.protocol_id.id = ost_pb.Protocol.kIp4FieldNumber
+    # reduce typing by creating a shorter reference to p.Extensions[ip4]
+    ip = p.Extensions[ip4]
+    ip.src_ip = ip_src
+    ip.dst_ip = ip_dst
+    # ip.is_override_hdrlen = True
+    # ip.is_override_totlen = True
+
+    # ip.totlen = 1200
+    # ip.dst_ip_mode = Ip4.e_im_inc_host
+
+    stream_config.protocol.add().protocol_id.id = ost_pb.Protocol.kTcpFieldNumber
+    p = stream_config.protocol.add()
+    p.protocol_id.id = ost_pb.Protocol.kTextProtocolFieldNumber
+    pload = p.Extensions[textProtocol]
+    pload.text = host_compute_1 + '/' + int_test_compute_1
+    pload.eol = TextProtocol.kCr
+
+def convert_ip_to_hex(ip):
+    a = str(ip).split('.')
+    return int('0x{:02X}{:02X}{:02X}{:02X}'.format(*map(int, a)), 16)
+def get_broadcast_ip(ip, mask):
+    net = ipaddress.IPv4Network(ip + '/' + mask, False)
+    return convert_ip_to_hex(net.broadcast_address)
+
+def get_machine_list(machines):
+
+    return [machine['hostname'] for machine in machines]
+
+def get_mgmt_ip_addresses_and_tests(machines):
+    machine_map = {}
+    for machine in machines:
+        if machine['power_state'] == "on":
+             machine_map[machine['hostname']] = {}
+             machine_map[machine['hostname']]['mgmt_ip'] = machine['boot_interface']['links'][0]['ip_address']
+             for interface in machine['interface_set']:
+                machine_map[machine['hostname']][interface['name']] = {}
+                machine_map[machine['hostname']][interface['name']]['mtu'] = interface['effective_mtu']
+                machine_map[machine['hostname']][interface['name']]['cidr'] = interface['links'][0]['subnet']['cidr']
+    return machine_map
+
+
+
+
+try:
+
+    machines = maas.maas_get("machines/")
+    environment = get_mgmt_ip_addresses_and_tests(machines)
+
+    connect_drone(drone1)
+    connect_drone(drone2)
+    tx_port_id = get_interface_by_name(drone1, int_test_compute_1)
+    rx_port_id = get_interface_by_name(drone2, int_test_compute_2)
+
+    rx_port = ost_pb.PortIdList()
+    rx_port.port_id.add().id = rx_port_id
+
+    tx_port = ost_pb.PortIdList()
+    tx_port.port_id.add().id = tx_port_id
+    stream = add_stream(drone1, tx_port)
+
+    # stream_cfg = ost_pb.StreamConfigList()
+    # stream_cfg.port_id.CopyFrom(tx_port.port_id[0])
+    #
+    # s_conf = configure_stream(stream, stream_cfg,3)
+    # configure_traffic_protocols(s_conf, 0x001122334455, 0xFFFFFFFFFFFF, convert_ip_to_hex(IP_ADD), get_broadcast_ip(IP_ADD,MASK))
+    # drone1.modifyStream(stream_cfg)
+    #
+    # drone2.startCapture(rx_port)
+    # drone1.startTransmit(tx_port)
+    #
+    # time.sleep(3)
+    #
+    # #stop transmit and capture
+    # log.info('stopping transmit')
+    # drone1.stopTransmit(tx_port)
+    # log.info('stopping capture')
+    # drone2.stopCapture(rx_port)
+    # buff = drone2.getCaptureBuffer(rx_port.port_id[0])
+    # drone2.saveCaptureBuffer(buff, 'capture.pcap')
+    #
+    # # Analyze pcap file
+    # to_analyze = rdpcap('capture.pcap')
+    # sessions = to_analyze.sessions()
+    # for session in sessions:
+    #     for packet in sessions[session]:
+    #         try:
+    #             if str(packet[IP].src) == IP_ADD:
+    #                 print(packet[TCP].payload)
+    #         except:
+    #             pass
+
+except Exception as ex:
+    log.exception(ex)
+    sys.exit(1)
